@@ -5,12 +5,15 @@
 #include <PortentaEthernet.h>
 #include <Ethernet.h>
 #include <mbed.h>
+#include <cstring> // Para memcpy
+#include "config.h" // Archivo de configuración con credenciales WiFi
 using namespace rtos;
 
 // ==== CONFIGURACIÓN DE RED ====
-const char* ssid = "User";
-const char* password = "Password";
-IPAddress localIp(192, 168, 0, 74);  // IP estática para Ethernet
+// Las credenciales WiFi ahora están en config.h (no se sube a GitHub)
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
+IPAddress localIp(ETHERNET_IP_1, ETHERNET_IP_2, ETHERNET_IP_3, ETHERNET_IP_4);
 bool usingEthernet = false;
 
 WiFiServer wifiServer(81);
@@ -88,8 +91,59 @@ void connectToNetwork() {
   wifiServer.begin();
 }
 
-// ==== ENDPOINT STREAMING MULTIPLES ====
-void sendCameraFrameOnce(Client& client) {
+// ==== PROCESAMIENTO DE IMAGEN ====
+void processImageToBinaryWhite(uint8_t* raw, size_t w, size_t h, uint8_t threshold = 200) {
+  // Convertir imagen a binario: blanco si pixel > threshold, negro si no
+  for (size_t i = 0; i < w * h; i++) {
+    if (raw[i] > threshold) {
+      raw[i] = 255; // Blanco
+    } else {
+      raw[i] = 0;   // Negro
+    }
+  }
+}
+
+void enhanceWhiteDetection(uint8_t* raw, size_t w, size_t h) {
+  // Crear una copia temporal para el procesamiento
+  uint8_t* temp = new uint8_t[w * h];
+  memcpy(temp, raw, w * h);
+  
+  // Aplicar filtro de mediana 3x3 para reducir ruido
+  for (int y = 1; y < h - 1; y++) {
+    for (int x = 1; x < w - 1; x++) {
+      uint8_t values[9];
+      int idx = 0;
+      
+      // Recoger valores de la ventana 3x3
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          values[idx++] = temp[(y + dy) * w + (x + dx)];
+        }
+      }
+      
+      // Ordenamiento burbuja simple para encontrar la mediana
+      for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8 - i; j++) {
+          if (values[j] > values[j + 1]) {
+            uint8_t temp_val = values[j];
+            values[j] = values[j + 1];
+            values[j + 1] = temp_val;
+          }
+        }
+      }
+      
+      raw[y * w + x] = values[4]; // Mediana (elemento central)
+    }
+  }
+  
+  delete[] temp;
+  
+  // Aplicar umbralización adaptativa para detección de blancos
+  processImageToBinaryWhite(raw, w, h, 180);
+}
+
+// ==== ENDPOINT STREAMING ORIGINAL ====
+void sendCameraFrameOriginal(Client& client) {
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: image/bmp");
   client.println("Connection: close");
@@ -135,6 +189,67 @@ void sendCameraFrameOnce(Client& client) {
   client.stop();
 }
 
+// ==== ENDPOINT STREAMING PROCESADO (BLANCO Y NEGRO) ====
+void sendCameraFrameProcessed(Client& client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: image/bmp");
+  client.println("Connection: close");
+  client.println();
+
+  if (cam.grabFrame(fb, 3000) == 0) {
+    uint8_t* raw = fb.getBuffer();
+    size_t w = FRAME_WIDTH;
+    size_t h = FRAME_HEIGHT;
+    
+    // Crear una copia del buffer para procesamiento
+    uint8_t* processedBuffer = new uint8_t[w * h];
+    memcpy(processedBuffer, raw, w * h);
+    
+    // Procesar imagen para detección de blancos (círculo del dojo)
+    enhanceWhiteDetection(processedBuffer, w, h);
+    
+    const int headerSize = 54;
+    const int paletteSize = 1024;
+    size_t bmpSize = headerSize + paletteSize + w * h;
+
+    uint8_t bmpHeader[54] = {
+      0x42, 0x4D, 0, 0, 0, 0, 0, 0, 0, 0, 0x36, 0x04, 0x00, 0x00, 0x28, 0x00,
+      0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x08, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0, 0, 0, 0, 0x13, 0x0B, 0, 0, 0x13, 0x0B, 0, 0, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+
+    bmpHeader[2] = (uint8_t)(bmpSize);
+    bmpHeader[3] = (uint8_t)(bmpSize >> 8);
+    bmpHeader[4] = (uint8_t)(bmpSize >> 16);
+    bmpHeader[5] = (uint8_t)(bmpSize >> 24);
+    bmpHeader[18] = (uint8_t)(w);
+    bmpHeader[19] = (uint8_t)(w >> 8);
+    bmpHeader[20] = (uint8_t)(w >> 16);
+    bmpHeader[21] = (uint8_t)(w >> 24);
+    int32_t negHeight = -h;
+    bmpHeader[22] = (uint8_t)(negHeight);
+    bmpHeader[23] = (uint8_t)(negHeight >> 8);
+    bmpHeader[24] = (uint8_t)(negHeight >> 16);
+    bmpHeader[25] = (uint8_t)(negHeight >> 24);
+
+    client.write(bmpHeader, 54);
+
+    // Paleta de colores para escala de grises
+    for (int i = 0; i < 256; i++) {
+      uint8_t entry[4] = { (uint8_t)i, (uint8_t)i, (uint8_t)i, 0x00 };
+      client.write(entry, 4);
+    }
+    
+    // Enviar imagen procesada
+    client.write(processedBuffer, w * h);
+    
+    // Liberar memoria
+    delete[] processedBuffer;
+  }
+  client.stop();
+}
+
 
 
 
@@ -170,10 +285,13 @@ void serveMainPage(Client& client) {
   client.println("Connection: close");
   client.println();
   client.println("<html><body>");
-  client.println("<h1>Streams de Cámara</h1>");
-  client.println("<img src='/stream1' /><br>");
-  client.println("<img src='/stream2' /><br>");
-  client.println("<img src='/stream3' /><br>");
+  client.println("<h1>Sumo Sentinel Vision - Streams de Cámara</h1>");
+  client.println("<h3>Stream 1 - Imagen Original:</h3>");
+  client.println("<img src='/stream1' style='border:2px solid #333; margin:5px;' /><br>");
+  client.println("<h3>Stream 2 - Procesado Blanco/Negro (Detección Dojo):</h3>");
+  client.println("<img src='/stream2' style='border:2px solid #333; margin:5px;' /><br>");
+  client.println("<h3>Stream 3 - Imagen Original:</h3>");
+  client.println("<img src='/stream3' style='border:2px solid #333; margin:5px;' /><br>");
   client.println("<h2>Métricas</h2>");
   client.println("<div id='metrics'></div>");
   client.println("<script>");
@@ -218,13 +336,13 @@ void loop() {
     //Serial.println(request);
 
     if (request.indexOf("GET /stream1") >= 0) {
-      sendCameraFrameOnce(*client);
+      sendCameraFrameOriginal(*client);
     }
     else if (request.indexOf("GET /stream2") >= 0) {
-      sendCameraFrameOnce(*client);
+      sendCameraFrameProcessed(*client); // Stream procesado en blanco y negro
     }
     else if (request.indexOf("GET /stream3") >= 0) {
-      sendCameraFrameOnce(*client);
+      sendCameraFrameOriginal(*client); // Por ahora igual al stream1
     }
 
     else if (request.indexOf("GET /metrics") >= 0) {

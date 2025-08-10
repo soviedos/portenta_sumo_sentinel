@@ -17,6 +17,9 @@
 # Debugger Files
 *.pdb
 
+# Arduino configuration files with sensitive data
+portenta_h7/config.h
+
 # Compiled Dynamic libraries
 *.so
 *.dylib
