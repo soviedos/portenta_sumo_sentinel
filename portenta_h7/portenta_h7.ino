@@ -8,8 +8,8 @@
 using namespace rtos;
 
 // ==== CONFIGURACIÓN DE RED ====
-const char* ssid = "TNT3";
-const char* password = "N0ti3n3c1ave";
+const char* ssid = "User";
+const char* password = "Password";
 IPAddress localIp(192, 168, 0, 74);  // IP estática para Ethernet
 bool usingEthernet = false;
 
