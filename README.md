@@ -8,7 +8,7 @@ Desarrollador: Sergio Oviedo Seas
 
 ## Descripción
 
-Portenta Sumo Sentinel es un sistema embebido basado en Arduino Portenta H7 que proporciona streaming de video en tiempo real y métricas del sistema para el monitoreo de competencias de sumo robótico. El sistema incluye capacidades de cámara, conectividad dual (WiFi/Ethernet) y un servidor web integrado.
+Portenta Sumo Sentinel es un sistema embebido basado en Arduino Portenta H7 que proporciona streaming de video en tiempo real y métricas del sistema para el monitoreo de competencias de sumo robótico. El sistema actúa como backend de datos, proporcionando endpoints HTTP que son consumidos por un servidor web externo (Raspberry Pi 4 con nginx) que aloja la interfaz de usuario.
 
 ## Características principales
 
@@ -16,23 +16,25 @@ Portenta Sumo Sentinel es un sistema embebido basado en Arduino Portenta H7 que 
 - **Conectividad dual** WiFi y Ethernet con failover automático
 - **Múltiples endpoints de streaming** (/stream1, /stream2, /stream3)
 - **API de métricas** del sistema en tiempo real
-- **Servidor web integrado** con página de monitoreo
-- **Soporte CORS** para integración con interfaces web externas
+- **Backend HTTP** que proporciona datos al servidor web externo
+- **Soporte CORS** para integración con servidor nginx en Raspberry Pi
 
 ## Hardware requerido
 
-### Componentes principales:
+### Hardware requerido:
 - **Arduino Portenta H7** (Dual Core ARM Cortex-M7 y M4)
 - **Portenta Vision Shield** con cámara HiMax HM01B0
 - **Cable Ethernet** (opcional)
 - **Antena WiFi** (incluida con Portenta)
+- **Raspberry Pi 4** (servidor web externo con nginx)
 
 ### Especificaciones técnicas:
 - **Resolución de cámara:** 160x120 píxeles
 - **Formato de imagen:** Escala de grises (8-bit)
 - **Conectividad:** WiFi 802.11b/g/n + Ethernet 10/100
-- **Puerto del servidor:** 81
+- **Puerto del backend:** 81
 - **IP estática Ethernet:** 192.168.0.74
+- **Servidor web:** Raspberry Pi 4 con nginx (puerto 80/443)
 
 ## Estructura del proyecto
 
@@ -101,7 +103,37 @@ Instalar las siguientes librerías desde el Library Manager:
 2. Configurar SSID y password WiFi
 3. Verificar y subir el código al Portenta H7
 
-## Funcionamiento del sistema
+## Arquitectura del sistema
+
+### Componentes de la solución:
+
+1. **Arduino Portenta H7** (Este proyecto)
+   - Backend HTTP en puerto 81
+   - Captura y streaming de video
+   - Recolección de métricas del sistema
+   - IP: 192.168.0.74:81
+
+2. **Raspberry Pi 4** (Servidor web externo)
+   - nginx server en puerto 80/443
+   - Hosting de la UI Interface
+   - Proxy reverso para endpoints del Portenta
+   - Gestión de contenido estático
+
+3. **UI Interface** (Frontend web)
+   - Aplicación HTML/CSS/JS
+   - Consumo de APIs del Portenta
+   - Visualización de streams y métricas
+   - Servida desde Raspberry Pi
+
+### Flujo de datos:
+
+```
+[Portenta H7] → [Raspberry Pi 4 + nginx] → [Usuario/Navegador]
+     ↓                    ↓                        ↓
+- Captura video      - Sirve UI Interface    - Visualiza streams
+- Genera métricas    - Proxy a Portenta      - Controla filtros
+- Endpoints HTTP     - Gestiona CORS         - Monitorea métricas
+```
 
 ### Conectividad automática:
 
@@ -114,16 +146,18 @@ El sistema implementa un mecanismo de failover automático:
 
 ### Endpoints disponibles:
 
-#### Streaming de video:
+#### API de métricas (Backend):
+- `http://192.168.0.74:81/metrics` - Datos JSON del sistema
+
+#### Streaming de video (Backend):
 - `http://192.168.0.74:81/stream1` - Stream principal
 - `http://192.168.0.74:81/stream2` - Stream procesado
 - `http://192.168.0.74:81/stream3` - Stream de análisis
 
-#### API de métricas:
-- `http://192.168.0.74:81/metrics` - Datos JSON del sistema
+#### Página principal (Solo para debug):
+- `http://192.168.0.74:81/` - Interfaz básica de monitoreo
 
-#### Página principal:
-- `http://192.168.0.74:81/` - Interfaz web de monitoreo
+**Nota:** Los usuarios acceden a la interfaz principal a través del servidor nginx en Raspberry Pi, no directamente al Portenta.
 
 ### Formato de métricas:
 
@@ -173,13 +207,66 @@ El sistema incluye monitoreo de memoria y CPU:
 - **Thread de medición CPU:** Cuenta ciclos inactivos
 - **Actualización de métricas:** Cada 5 segundos
 
-## Integración con UI Interface
+## Integración con servidor externo
 
-Este sistema está diseñado para trabajar con la **UI Interface** web:
+### Configuración de nginx (Raspberry Pi 4):
 
-1. **Configurar IP:** Asegurar que la IP coincida en ambos sistemas
-2. **CORS habilitado:** El sistema incluye headers CORS para requests externos
-3. **Formato JSON:** Compatible con el sistema de gráficas Chart.js
+El Portenta H7 actúa como backend de datos. Para la integración completa, el servidor nginx debe configurarse como proxy reverso:
+
+```nginx
+# Configuración sugerida para nginx
+server {
+    listen 80;
+    server_name tu-dominio.com;
+    
+    # Servir UI Interface
+    location / {
+        root /var/www/html/UI_Interface;
+        index index.html;
+    }
+    
+    # Proxy para métricas del Portenta
+    location /api/metrics {
+        proxy_pass http://192.168.0.74:81/metrics;
+        proxy_set_header Host $host;
+        add_header Access-Control-Allow-Origin *;
+    }
+    
+    # Proxy para streams del Portenta
+    location /api/stream1 {
+        proxy_pass http://192.168.0.74:81/stream1;
+        proxy_set_header Host $host;
+    }
+    
+    location /api/stream2 {
+        proxy_pass http://192.168.0.74:81/stream2;
+        proxy_set_header Host $host;
+    }
+    
+    location /api/stream3 {
+        proxy_pass http://192.168.0.74:81/stream3;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+### Ventajas de la arquitectura distribuida:
+
+1. **Separación de responsabilidades:**
+   - Portenta: Captura y procesamiento de datos
+   - Raspberry Pi: Interfaz web y gestión de usuarios
+
+2. **Escalabilidad:**
+   - El Portenta se enfoca en tareas de tiempo real
+   - El servidor web maneja múltiples usuarios simultáneos
+
+3. **Mantenimiento:**
+   - Actualizaciones de UI sin afectar el Portenta
+   - Reinicio independiente de cada componente
+
+4. **Seguridad:**
+   - El Portenta no expone directamente la interfaz web
+   - nginx gestiona SSL/TLS y autenticación
 
 ## Troubleshooting
 
