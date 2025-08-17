@@ -100,8 +100,26 @@ Instalar las siguientes librerías desde el Library Manager:
 ### 4. Carga del código:
 
 1. Abrir `portenta_h7/portenta_h7.ino`
-2. Configurar SSID y password WiFi
+2. Configurar SSID y password WiFi en `config.h`
 3. Verificar y subir el código al Portenta H7
+
+### 5. Ajuste de parámetros de detección:
+
+El sistema incluye parámetros configurables para optimizar la detección del círculo blanco del dojo:
+
+```cpp
+#define ADAPTIVE_THRESHOLD_OFFSET 40  // Diferencia mínima con el promedio local
+#define MIN_CIRCLE_AREA 50           // Área mínima del círculo (píxeles)
+#define MAX_CIRCLE_AREA 3000         // Área máxima del círculo (píxeles)
+#define LOCAL_AREA_MIN 8             // Mínimo de píxeles blancos en área 7x7
+#define LOCAL_AREA_MAX 35            // Máximo de píxeles blancos en área 7x7
+```
+
+**Guía de ajuste:**
+- Si detecta demasiadas luces externas: **Aumentar** `ADAPTIVE_THRESHOLD_OFFSET`
+- Si no detecta el círculo completo: **Disminuir** `ADAPTIVE_THRESHOLD_OFFSET`
+- Si detecta objetos muy pequeños: **Aumentar** `LOCAL_AREA_MIN`
+- Si no detecta círculos grandes: **Aumentar** `LOCAL_AREA_MAX`
 
 ## Arquitectura del sistema
 
@@ -150,9 +168,35 @@ El sistema implementa un mecanismo de failover automático:
 - `http://192.168.0.74:81/metrics` - Datos JSON del sistema
 
 #### Streaming de video (Backend):
-- `http://192.168.0.74:81/stream1` - Stream principal
-- `http://192.168.0.74:81/stream2` - Stream procesado
-- `http://192.168.0.74:81/stream3` - Stream de análisis
+- `http://192.168.0.74:81/stream1` - Stream original de la cámara (escala de grises)
+- `http://192.168.0.74:81/stream2` - Stream con detección de círculo mejorada (blanco y negro)
+- `http://192.168.0.74:81/stream3` - **Stream con detección de círculos y overlay en gris claro**
+
+**Algoritmo de detección de círculos con overlay (compatible con HM01B0):**
+El sistema trabaja en escala de grises nativa y incluye:
+
+1. **Detección en escala de grises** - Compatible con HM01B0 HiMax camera
+2. **Detecta píxeles blancos** usando algoritmo optimizado
+3. **Encuentra contornos** y analiza componentes conectados
+4. **Identifica el círculo más grande** basado en:
+   - Centroide del componente
+   - Radio promedio desde el centro
+   - Métrica de circularidad (baja varianza = más circular)
+5. **Dibuja overlay en gris claro (220)** sobre la imagen original:
+   - Círculo marcado con línea de gris claro
+   - Cruz en el centro del círculo
+6. **Calcula coordenadas exactas** del centro (x, y) y radio en píxeles
+
+**Información del círculo detectado:**
+- Coordenadas del centro: (x, y) en píxeles
+- Radio del círculo en píxeles
+- Nivel de confianza de la detección (0.0 - 1.0)
+- Estado de detección (detectado/no detectado)
+
+**Limitaciones de hardware:**
+- La cámara HM01B0 solo soporta `CAMERA_GRAYSCALE` de forma confiable
+- El overlay se muestra en gris claro (valor 220) para simular resaltado
+- RGB565 no está soportado de forma estable en esta configuración
 
 #### Página principal (Solo para debug):
 - `http://192.168.0.74:81/` - Interfaz básica de monitoreo
@@ -161,13 +205,18 @@ El sistema implementa un mecanismo de failover automático:
 
 ### Formato de métricas:
 
-El endpoint `/metrics` retorna datos en formato JSON:
+El endpoint `/metrics` retorna datos en formato JSON incluyendo información del círculo detectado:
 
 ```json
 {
   "uptime_ms": 123456,
   "free_memory": 65536,
   "idle_count": 12345,
+  "circle_detected": true,
+  "circle_x": 80,
+  "circle_y": 60,
+  "circle_radius": 25,
+  "circle_confidence": 0.85,
   "network": "wifi",
   "ip": "192.168.0.74",
   "rssi": -45
@@ -178,6 +227,10 @@ El endpoint `/metrics` retorna datos en formato JSON:
 - `uptime_ms`: Tiempo de funcionamiento en milisegundos
 - `free_memory`: Memoria RAM libre en bytes
 - `idle_count`: Contador de ciclos inactivos del CPU
+- `circle_detected`: Boolean - si se detectó un círculo válido
+- `circle_x`, `circle_y`: Coordenadas del centro del círculo detectado
+- `circle_radius`: Radio del círculo en píxeles
+- `circle_confidence`: Nivel de confianza de la detección (0.0-1.0)
 - `network`: Tipo de conexión ("wifi" o "ethernet")
 - `ip`: Dirección IP asignada
 - `rssi`: Intensidad de señal WiFi en dBm (solo para WiFi)
@@ -300,6 +353,46 @@ server {
 - Reducir resolución de cámara si es necesario
 - Optimizar frecuencia de actualización de métricas
 - Verificar memoria disponible
+
+## Optimización del algoritmo de detección
+
+### Problemas comunes y soluciones:
+
+### Problemas comunes y soluciones:
+
+**❌ Problema:** Ya no detecta blancos (algoritmo muy estricto)
+- **✅ Solución:** Usar `simpleWhiteDetection()` en lugar de `enhanceCircleDetection()`
+- **✅ Código:** Cambiar la línea en `sendCameraFrameProcessed()`:
+  ```cpp
+  // Cambiar de:
+  enhanceCircleDetection(processedBuffer, w, h);
+  // A:
+  simpleWhiteDetection(processedBuffer, w, h);
+  ```
+
+**❌ Problema:** Solo detecta la mitad del círculo
+- **✅ Solución:** Disminuir `ADAPTIVE_THRESHOLD_OFFSET` de 40 a 25-30
+- **✅ Solución:** Aumentar `LOCAL_AREA_MAX` de 35 a 50
+
+**❌ Problema:** Detecta luces externas como círculos
+- **✅ Solución:** Aumentar `ADAPTIVE_THRESHOLD_OFFSET` de 40 a 55-60
+- **✅ Solución:** Ajustar `LOCAL_AREA_MIN` y `LOCAL_AREA_MAX` para el tamaño específico del círculo del dojo
+
+**❌ Problema:** No detecta el círculo en condiciones de poca luz
+- **✅ Solución:** Disminuir `ADAPTIVE_THRESHOLD_OFFSET` gradualmente
+- **✅ Solución:** Verificar la iluminación del dojo
+
+**❌ Problema:** Detecta múltiples objetos pequeños
+- **✅ Solución:** Aumentar `LOCAL_AREA_MIN` de 8 a 12-15
+- **✅ Solución:** Aplicar `morphologicalOpening` más agresivo
+
+### Proceso de calibración:
+
+1. Observar el stream2 (imagen procesada) en tiempo real
+2. Ajustar parámetros uno por uno
+3. Recompilar y subir el código
+4. Evaluar los resultados
+5. Repetir hasta obtener detección óptima
 
 ## Monitoreo y debugging
 
